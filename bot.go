@@ -11,6 +11,7 @@ import (
 	"go.cryptoscope.co/margaret"
 
 	"go.cryptoscope.co/ssb"
+	"go.cryptoscope.co/ssb/message"
 	mksbot "go.cryptoscope.co/ssb/sbot"
 )
 
@@ -22,6 +23,8 @@ var (
 	// juicy bits
 	appKey  string = "1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s="
 	hmacSec string
+
+	theBot *mksbot.Sbot
 )
 
 func checkAndLog(err error) {
@@ -32,7 +35,12 @@ func checkAndLog(err error) {
 	}
 }
 
-func Start() {
+func Stop() error {
+	theBot.Shutdown()
+	return theBot.Close()
+}
+
+func Start(repoPath string) {
 	logging.SetupLogging(os.Stderr)
 	log = logging.Logger("sbot")
 
@@ -41,11 +49,11 @@ func Start() {
 	ak, err := base64.StdEncoding.DecodeString(appKey)
 	checkFatal(err)
 
-	listenAddr := "192.168.0.101:8008"
-	sbot, err := mksbot.New(
+	listenAddr := ":8008"
+	theBot, err = mksbot.New(
 		mksbot.WithInfo(log),
 		mksbot.WithAppKey(ak),
-		mksbot.WithRepoPath("/storage/my/ssb/folder"),
+		mksbot.WithRepoPath(repoPath),
 		mksbot.WithListenAddr(listenAddr),
 		mksbot.EnableAdvertismentBroadcasts(true),
 		mksbot.EnableAdvertismentDialing(true),
@@ -71,13 +79,9 @@ func Start() {
 	logging.SetCloseChan(c)
 	*/
 
-	id := sbot.KeyPair.Id
-	uf, ok := sbot.GetMultiLog("userFeeds")
-	if !ok {
-		checkAndLog(fmt.Errorf("missing userFeeds index"))
-		return
-	}
-	gb := sbot.GraphBuilder
+	id := theBot.KeyPair.Id
+	uf := theBot.UserFeeds
+	gb := theBot.GraphBuilder
 
 	feeds, err := uf.List()
 	checkFatal(err)
@@ -99,28 +103,28 @@ func Start() {
 		} else {
 			checkFatal(err)
 		}
-		rv, err := sbot.RootLog.Get(rlSeq.(margaret.BaseSeq))
+		rv, err := theBot.RootLog.Get(rlSeq.(margaret.BaseSeq))
 		if margaret.IsErrNulled(err) {
 			continue
 		} else {
 			checkFatal(err)
 		}
-		msg := rv.(ssb.Message)
+		msg := rv.(message.StoredMessage)
 
-		if msg.Seq() != userLogSeq.Seq()+1 {
-			err = fmt.Errorf("light fsck failed: head of feed mismatch on %s: %d vs %d", authorRef.Ref(), msg.Seq(), userLogSeq.Seq()+1)
+		if msg.Sequence.Seq() != userLogSeq.Seq()+1 {
+			err = fmt.Errorf("light fsck failed: head of feed mismatch on %s: %d vs %d", authorRef.Ref(), msg.Sequence, userLogSeq.Seq()+1)
 			log.Log("warning", err)
 			continue
 		}
 
-		msgCount += uint(msg.Seq())
+		msgCount += uint(msg.Sequence.Seq())
 
 		f, err := gb.Follows(authorRef)
 		checkFatal(err)
 
 		if len(feeds) < 20 {
 			h := gb.Hops(authorRef, 2)
-			log.Log("info", "currSeq", "feed", authorRef.Ref(), "seq", msg.Seq(), "follows", f.Count(), "hops", h.Count())
+			log.Log("info", "currSeq", "feed", authorRef.Ref(), "seq", msg.Sequence.Seq(), "follows", f.Count(), "hops", h.Count())
 		}
 		followCnt += uint(f.Count())
 	}
@@ -128,15 +132,17 @@ func Start() {
 	log.Log("event", "repo open", "feeds", len(feeds), "msgs", msgCount, "follows", followCnt)
 
 	log.Log("event", "serving", "ID", id.Ref(), "addr", listenAddr)
-	for {
-		// Note: This is where the serving starts ;)
-		err = sbot.Network.Serve(ctx)
-		log.Log("event", "sbot node.Serve returned", "err", err)
-		time.Sleep(1 * time.Second)
-		select {
-		case <-ctx.Done():
-			os.Exit(0)
-		default:
+	go func() {
+		for {
+			// Note: This is where the serving starts ;)
+			err = theBot.Network.Serve(ctx)
+			log.Log("event", "sbot node.Serve returned, restarting..", "err", err)
+			time.Sleep(1 * time.Second)
+			select {
+			case <-ctx.Done():
+				os.Exit(0)
+			default:
+			}
 		}
-	}
+	}()
 }
